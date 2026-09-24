@@ -58,6 +58,7 @@ class ArbTranslatorArgumentParser {
   static const _codexReasoningEffort = 'codex_reasoning_effort';
   static const _codexTimeoutSeconds = 'codex_timeout_seconds';
   static const _codexMaxAgents = 'codex_max_agents';
+  static const _codexBatchMaxResources = 'codex_batch_max_resources';
   static const _localLlmUrl = 'local_llm_url';
   static const _localLlmModel = 'local_llm_model';
   static const _localLlmJsonMode = 'local_llm_json_mode';
@@ -227,6 +228,11 @@ class ArbTranslatorArgumentParser {
         defaultsTo: CodexOptions.defaultMaxAgents.toString(),
       )
       ..addOption(
+        _codexBatchMaxResources,
+        help: 'translate changes of at most this many resources for all locales in one Codex run; 0 disables',
+        defaultsTo: CodexOptions.defaultBatchMaxResources.toString(),
+      )
+      ..addOption(
         _localLlmUrl,
         help: 'OpenAI-compatible chat-completions URL used when translation_service=local_llm',
         defaultsTo: LocalLlmOptions.defaultEndpoint,
@@ -316,6 +322,14 @@ class ArbTranslatorArgumentParser {
     if (raw == null) return CodexOptions.defaultTimeoutSeconds;
     final parsed = raw is int ? raw : int.tryParse(raw.toString().trim());
     if (parsed == null || parsed < 1) return CodexOptions.defaultTimeoutSeconds;
+    return parsed;
+  }
+
+  /// Parses the all-locale Codex batch threshold; 0 disables batching.
+  static int parseCodexBatchMaxResources(dynamic raw) {
+    if (raw == null) return CodexOptions.defaultBatchMaxResources;
+    final parsed = raw is int ? raw : int.tryParse(raw.toString().trim());
+    if (parsed == null || parsed < 0) return CodexOptions.defaultBatchMaxResources;
     return parsed;
   }
 
@@ -465,6 +479,9 @@ class ArbTranslatorArgumentParser {
     final codexMaxAgents = parseCodexMaxAgents(
       mergedResult[_codexMaxAgents],
     );
+    final codexBatchMaxResources = parseCodexBatchMaxResources(
+      mergedResult[_codexBatchMaxResources],
+    );
     final localLlmUrl = (mergedResult[_localLlmUrl] as String?)?.trim() ?? LocalLlmOptions.defaultEndpoint;
     final localLlmModel = (mergedResult[_localLlmModel] as String?)?.trim();
     final localLlmJsonMode = mergedResult[_localLlmJsonMode] as bool? ?? true;
@@ -564,6 +581,7 @@ class ArbTranslatorArgumentParser {
           reasoningEffort: codexReasoningEffort,
           timeoutSeconds: codexTimeoutSeconds,
           maxAgents: codexMaxAgents,
+          batchMaxResources: codexBatchMaxResources,
         );
       } on ArgumentError catch (error) {
         _setBrightRed();
@@ -644,6 +662,9 @@ class ArbTranslatorArgumentParser {
     if (pubspecConfig.codexMaxAgents != null) {
       mergedOptions[_codexMaxAgents] = pubspecConfig.codexMaxAgents;
     }
+    if (pubspecConfig.codexBatchMaxResources != null) {
+      mergedOptions[_codexBatchMaxResources] = pubspecConfig.codexBatchMaxResources;
+    }
     if (pubspecConfig.localLlmUrl != null) {
       mergedOptions[_localLlmUrl] = pubspecConfig.localLlmUrl;
     }
@@ -698,6 +719,7 @@ class ArbTranslatorArgumentParser {
     mergedOptions[_codexExecutable] ??= CodexOptions.defaultExecutable;
     mergedOptions[_codexTimeoutSeconds] ??= CodexOptions.defaultTimeoutSeconds.toString();
     mergedOptions[_codexMaxAgents] ??= CodexOptions.defaultMaxAgents.toString();
+    mergedOptions[_codexBatchMaxResources] ??= CodexOptions.defaultBatchMaxResources.toString();
     mergedOptions[_localLlmUrl] ??= LocalLlmOptions.defaultEndpoint;
     mergedOptions[_localLlmJsonMode] ??= true;
     mergedOptions[_localLlmTimeoutSeconds] ??= LocalLlmOptions.defaultTimeoutSeconds.toString();
@@ -883,6 +905,7 @@ class ArbTranslatorArgumentParser {
       config[_codexExecutable] = CodexOptions.defaultExecutable;
       config[_codexTimeoutSeconds] = CodexOptions.defaultTimeoutSeconds;
       config[_codexMaxAgents] = CodexOptions.defaultMaxAgents;
+      config[_codexBatchMaxResources] = CodexOptions.defaultBatchMaxResources;
     } else {
       // V2 services require API key authentication
       config[_authMode] = 'api_key';
@@ -1102,6 +1125,7 @@ class ArbTranslatorArgumentParser {
       'codex_reasoning_effort:',
       'codex_timeout_seconds:',
       'codex_max_agents:',
+      'codex_batch_max_resources:',
       'local_llm_url:',
       'local_llm_model:',
       'local_llm_json_mode:',
@@ -1214,6 +1238,7 @@ class ArbTranslatorArgumentParser {
   static String get codexReasoningEffort => _codexReasoningEffort;
   static String get codexTimeoutSeconds => _codexTimeoutSeconds;
   static String get codexMaxAgents => _codexMaxAgents;
+  static String get codexBatchMaxResources => _codexBatchMaxResources;
   static String get localLlmUrl => _localLlmUrl;
   static String get localLlmModel => _localLlmModel;
   static String get localLlmJsonMode => _localLlmJsonMode;

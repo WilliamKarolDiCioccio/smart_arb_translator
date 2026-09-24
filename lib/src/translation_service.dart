@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -216,6 +217,14 @@ class TranslationService {
         } on FormatException catch (error) {
           lastFormatError = error;
           if (attempt == 1) rethrow;
+        } on TimeoutException catch (error) {
+          // A stalled or failed run is usually transient: retry once, then let
+          // the caller skip this locale instead of aborting the whole job.
+          if (attempt == 1) throw CodexLocaleUnavailable(targetLanguage, error);
+          print('  ⚠ Codex timed out for $targetLanguage; retrying once.');
+        } on CodexRunFailure catch (error) {
+          if (attempt == 1) throw CodexLocaleUnavailable(targetLanguage, error);
+          print('  ⚠ Codex failed for $targetLanguage; retrying once.');
         }
       }
       throw lastFormatError ?? const FormatException('Codex returned invalid translations.');
@@ -1096,6 +1105,71 @@ class TranslationService {
       );
     }
     return response;
+  }
+
+  /// Translates [resources] into all [targetLocales] with one Codex run and
+  /// applies the same placeholder, ICU and localization checks as the
+  /// per-locale path. Locales that are missing or fail validation are left
+  /// out of the result so the caller translates them individually; a failed
+  /// run returns an empty map.
+  static Future<Map<String, List<TranslationResult>>> translateCodexBatch({
+    required List<TranslationResource> resources,
+    required List<String> targetLocales,
+    required String? sourceLocale,
+    required String? translationContext,
+    required CodexOptions codexOptions,
+    CodexRunner? codexRunner,
+  }) async {
+    if (resources.isEmpty || targetLocales.isEmpty) return const {};
+    final protectedTexts = resources.map(_protectStructuredResourcePlaceholders).toList(growable: false);
+    final preparedTexts = _prepareOpenAiTexts(protectedTexts);
+    final Map<String, List<TranslationResult>> rawByLocale;
+    try {
+      rawByLocale = await CodexTranslationService.translateBatch(
+        resources: resources,
+        protectedSourceTexts: preparedTexts.promptTexts,
+        targetLocales: targetLocales,
+        sourceLocale: sourceLocale,
+        translationContext: translationContext?.trim(),
+        options: codexOptions,
+        runner: codexRunner ?? const CodexCliRunner(),
+      );
+    } on TimeoutException catch (error) {
+      print('  ⚠ Codex batch run failed ($error); translating locales individually.');
+      return const {};
+    } on CodexRunFailure catch (error) {
+      print('  ⚠ Codex batch run failed ($error); translating locales individually.');
+      return const {};
+    } on FormatException catch (error) {
+      print('  ⚠ Codex batch run failed ($error); translating locales individually.');
+      return const {};
+    }
+
+    final validated = <String, List<TranslationResult>>{};
+    for (final entry in rawByLocale.entries) {
+      try {
+        final restored = _restoreOpenAiPlaceholders(
+          entry.value.map((result) => result.translation).toList(growable: false),
+          preparedTexts.placeholderTokensByText,
+          providerLabel: 'Codex',
+        );
+        _assertStructuredIcuIntegrity(resources: resources, translations: restored, providerLabel: 'Codex');
+        _assertTranslationsLikelyLocalized(
+          translations: restored,
+          promptTexts: preparedTexts.promptTexts,
+          placeholderTokensByText: preparedTexts.placeholderTokensByText,
+          targetLanguage: entry.key,
+          providerLabel: 'Codex',
+        );
+        validated[entry.key] = List<TranslationResult>.generate(
+          resources.length,
+          (index) => TranslationResult(id: resources[index].id, translation: restored[index]),
+        );
+      } on FormatException catch (error) {
+        print('  ⚠ Codex batch output for ${entry.key} was rejected ($error); translating it individually.');
+      }
+    }
+    return validated;
   }
 
   static _OpenAiPreparedTexts _prepareOpenAiTexts(List<String> translateList) {

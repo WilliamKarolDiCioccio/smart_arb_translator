@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:collection/collection.dart';
 
 import 'arb_resource.dart';
 
@@ -109,12 +108,9 @@ class ArbDocument {
   ///
   /// Returns a map suitable for JSON serialization.
   Map<String, dynamic> toJson() {
-    final resourceMap = resources.values.fold<Map<String, dynamic>>(
-      <String, dynamic>{},
-      (previousValue, resource) {
-        return <String, dynamic>{...previousValue, ...resource.toJson()};
-      },
-    );
+    final resourceMap = <String, dynamic>{
+      for (final resource in resources.values) ...resource.toJson(),
+    };
 
     return <String, dynamic>{
       if (locale != null) '@@locale': locale,
@@ -159,9 +155,10 @@ class ArbDocument {
 
     final resourceEntries =
         json.entries.where((entry) => !entry.key.startsWith('@')).map<MapEntry<String, ArbResource>>((entry) {
-      final attributesEntry = (json.entries.firstWhereOrNull(
-        (attributeEntry) => attributeEntry.key == '@${entry.key}',
-      ));
+      // Direct lookup: scanning all entries per resource made decoding
+      // quadratic, which dominated runs over large combined locale files.
+      final attributeKey = '@${entry.key}';
+      final attributesEntry = json.containsKey(attributeKey) ? MapEntry(attributeKey, json[attributeKey]) : null;
 
       return MapEntry(
         entry.key,

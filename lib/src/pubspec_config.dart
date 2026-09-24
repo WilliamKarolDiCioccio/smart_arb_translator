@@ -102,6 +102,9 @@ class PubspecConfig {
   /// Maximum concurrently active Codex child agents.
   final int? codexMaxAgents;
 
+  /// All-locale Codex batch threshold in resources; 0 disables batching.
+  final int? codexBatchMaxResources;
+
   /// OpenAI-compatible chat-completions URL for `local_llm`.
   final String? localLlmUrl;
 
@@ -172,6 +175,7 @@ class PubspecConfig {
     this.codexReasoningEffort,
     this.codexTimeoutSeconds,
     this.codexMaxAgents,
+    this.codexBatchMaxResources,
     this.localLlmUrl,
     this.localLlmModel,
     this.localLlmJsonMode,
@@ -252,6 +256,7 @@ class PubspecConfig {
           config['codex_timeout_seconds'],
         ),
         codexMaxAgents: _parsePositiveInt(config['codex_max_agents']),
+        codexBatchMaxResources: _parseNonNegativeInt(config['codex_batch_max_resources']),
         localLlmUrl: config['local_llm_url'] as String?,
         localLlmModel: config['local_llm_model'] as String?,
         localLlmJsonMode: config['local_llm_json_mode'] as bool?,
@@ -311,6 +316,12 @@ class PubspecConfig {
   ///
   /// Accepts native ints or numeric strings, returning `null` for any other
   /// value or when the parsed result is less than 1.
+  static int? _parseNonNegativeInt(dynamic value) {
+    if (value == null) return null;
+    final parsed = value is int ? value : int.tryParse(value.toString().trim());
+    return parsed == null || parsed < 0 ? null : parsed;
+  }
+
   static int? _parsePositiveInt(dynamic value) {
     if (value == null) return null;
     if (value is int) return value < 1 ? null : value;
@@ -352,6 +363,7 @@ class PubspecConfig {
         codexReasoningEffort != null ||
         codexTimeoutSeconds != null ||
         codexMaxAgents != null ||
+        codexBatchMaxResources != null ||
         localLlmUrl != null ||
         localLlmModel != null ||
         localLlmJsonMode != null ||
@@ -398,6 +410,7 @@ class PubspecConfig {
         'codexReasoningEffort: $codexReasoningEffort, '
         'codexTimeoutSeconds: $codexTimeoutSeconds, '
         'codexMaxAgents: $codexMaxAgents, '
+        'codexBatchMaxResources: $codexBatchMaxResources, '
         'localLlmUrl: $localLlmUrl, '
         'localLlmModel: $localLlmModel, '
         'localLlmJsonMode: $localLlmJsonMode, '

@@ -33,7 +33,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dev_dependencies:
-  smart_arb_translator: ^1.10.0
+  smart_arb_translator: ^1.11.0
 ```
 
 Then run:
@@ -308,9 +308,22 @@ smart_arb_translator:
   codex_reasoning_effort: high  # Optional
   codex_timeout_seconds: 900
   codex_max_agents: 3           # Minimum 2 for independent verification
+  codex_batch_max_resources: 20 # All-locale batch threshold; 0 disables
   parallel_translations: 2      # Concurrent locale-level Codex runs
   translation_context_file: docs/translation_context.md
 ```
+
+When a source file's pending change is at most `codex_batch_max_resources`
+strings, every target locale is translated in **one** Codex run instead of one
+run per locale, so a small edit takes minutes rather than a run per language.
+Each locale in the batch is validated separately; any locale that is missing or
+fails validation, or the whole batch if the run fails, falls back to per-locale
+runs.
+
+A locale whose Codex run times out or exits with an error is retried once. If it
+fails again it is skipped: its strings keep their previous (or source-language)
+text, the run still finishes and merges every other locale, a summary lists the
+skipped locales, and the next run translates only what was skipped.
 
 `codex_max_agents` is passed to Codex's
 `agents.max_concurrent_threads_per_session` setting and controls child-agent
@@ -501,6 +514,7 @@ smart_arb_translator:
   # codex_reasoning_effort: high              # Optional model reasoning override
   # codex_timeout_seconds: 900
   # codex_max_agents: 3                       # Minimum 2 for independent verification
+  # codex_batch_max_resources: 20             # Translate small changes for all locales in one run; 0 disables
   # local_llm_url: http://127.0.0.1:11434/v1/chat/completions
   # local_llm_model: qwen3.5:27b              # Required when translation_service=local_llm
   # local_llm_json_mode: true                 # Disable for endpoints that reject response_format
@@ -663,6 +677,7 @@ All options can be configured in `pubspec.yaml` under the `smart_arb_translator`
 | `--codex_reasoning_effort` | Optional Codex reasoning effort override | Signed-in Codex default | `codex_reasoning_effort` |
 | `--codex_timeout_seconds` | Timeout for one Codex orchestration run | `900` | `codex_timeout_seconds` |
 | `--codex_max_agents` | Maximum active child agents in a Codex job; minimum 2 | `3` | `codex_max_agents` |
+| `--codex_batch_max_resources` | Translate changes of up to this many resources for all locales in one Codex run; `0` disables | `20` | `codex_batch_max_resources` |
 | `--local_llm_url` | OpenAI-compatible local chat-completions endpoint or base URL | `http://127.0.0.1:11434/v1/chat/completions` | `local_llm_url` |
 | `--local_llm_model` | Model identifier exposed by the local runtime; required for `local_llm` | - | `local_llm_model` |
 | `--[no-]local_llm_json_mode` | Request JSON mode through `response_format` | `true` | `local_llm_json_mode` |

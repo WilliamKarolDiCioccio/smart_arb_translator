@@ -3,6 +3,10 @@ class CodexOptions {
   static const String defaultExecutable = 'codex';
   static const int defaultTimeoutSeconds = 900;
   static const int defaultMaxAgents = 3;
+
+  /// Changes of at most this many resources are translated for every target
+  /// locale in a single Codex run instead of one run per locale. 0 disables it.
+  static const int defaultBatchMaxResources = 20;
   static const Set<String> allowedReasoningEfforts = {
     'none',
     'minimal',
@@ -19,6 +23,7 @@ class CodexOptions {
   final String? reasoningEffort;
   final Duration timeout;
   final int maxAgents;
+  final int batchMaxResources;
 
   const CodexOptions({
     this.executable = defaultExecutable,
@@ -26,6 +31,7 @@ class CodexOptions {
     this.reasoningEffort,
     this.timeout = const Duration(seconds: defaultTimeoutSeconds),
     this.maxAgents = defaultMaxAgents,
+    this.batchMaxResources = defaultBatchMaxResources,
   });
 
   factory CodexOptions.fromConfig({
@@ -34,6 +40,7 @@ class CodexOptions {
     String? reasoningEffort,
     int timeoutSeconds = defaultTimeoutSeconds,
     int maxAgents = defaultMaxAgents,
+    int batchMaxResources = defaultBatchMaxResources,
   }) {
     final normalizedExecutable = executable?.trim();
     final normalizedModel = model?.trim();
@@ -47,6 +54,7 @@ class CodexOptions {
           normalizedReasoningEffort == null || normalizedReasoningEffort.isEmpty ? null : normalizedReasoningEffort,
       timeout: Duration(seconds: timeoutSeconds),
       maxAgents: maxAgents,
+      batchMaxResources: batchMaxResources,
     );
     options.validate();
     return options;
@@ -75,6 +83,13 @@ class CodexOptions {
         'must not exceed 16',
       );
     }
+    if (batchMaxResources < 0) {
+      throw ArgumentError.value(
+        batchMaxResources,
+        'batchMaxResources',
+        'must be 0 (disabled) or positive',
+      );
+    }
     if (reasoningEffort != null && reasoningEffort!.isNotEmpty && !allowedReasoningEfforts.contains(reasoningEffort)) {
       throw ArgumentError.value(
         reasoningEffort,
@@ -84,7 +99,9 @@ class CodexOptions {
     }
   }
 
-  /// All settings that can change a generated translation.
+  /// All settings that can change a generated translation. [batchMaxResources]
+  /// only changes how requests are grouped, so it is deliberately excluded:
+  /// changing it must not invalidate existing translations.
   String get cacheIdentity => <String>[
         model ?? 'configured-default',
         'reasoning=${reasoningEffort ?? 'configured-default'}',

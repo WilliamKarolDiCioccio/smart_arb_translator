@@ -114,6 +114,9 @@ Future<void> main(List<String> args) async {
             maxAgents: ArbTranslatorArgumentParser.parseCodexMaxAgents(
               result[ArbTranslatorArgumentParser.codexMaxAgents],
             ),
+            batchMaxResources: ArbTranslatorArgumentParser.parseCodexBatchMaxResources(
+              result[ArbTranslatorArgumentParser.codexBatchMaxResources],
+            ),
           )
         : null;
     final translationContext = _readTranslationContext(

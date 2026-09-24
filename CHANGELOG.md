@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-09-24
+
+### Added
+
+- Translate small changes (up to `codex_batch_max_resources` strings, default 20) into every target locale in a single Codex run instead of one run per locale. Each locale is validated separately and falls back to its own run if needed.
+
+### Changed
+
+- Locale jobs run through a worker pool: a finished locale immediately frees its slot instead of waiting for the slowest locale in a fixed chunk.
+- A Codex run that times out or exits with an error is retried once and then skipped instead of aborting the whole job. Skipped strings keep their previous or source text, are listed in a summary, and are retried on the next run.
+
+### Fixed
+
+- Decoding and encoding ARB documents were quadratic in the number of resources (a linear search for each `@key` attribute entry, and a full map copy per resource). A 1 MB combined locale file now decodes in ~17 ms instead of ~400 ms, which made no-change runs over many source files and locales take tens of minutes.
+
 ## [1.10.0] - 2026-09-03
 
 ### Added

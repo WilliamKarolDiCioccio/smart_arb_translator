@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:smart_arb_translator/src/dart_code_generator.dart';
 import 'package:smart_arb_translator/src/arb_processor.dart';
 import 'package:smart_arb_translator/src/codex_translation_service.dart';
+import 'package:smart_arb_translator/src/concurrency.dart';
 import 'package:smart_arb_translator/src/file_operations.dart';
 import 'package:smart_arb_translator/src/models/arb_document.dart';
 import 'package:smart_arb_translator/src/models/arb_resource.dart';
@@ -163,6 +164,7 @@ class SingleFileProcessor {
         'Per-language parallelism: $effectiveParallelism concurrent translation requests',
       );
     }
+    SkippedTranslations.clear();
 
     final translationLanguageCodes =
         languageCodes.where((languageCode) => !_isSameLocale(languageCode, dartMainLocale)).toList(growable: false);
@@ -202,14 +204,10 @@ class SingleFileProcessor {
       );
     }
 
-    for (final chunk in _chunked(
-      translationLanguageCodes,
-      effectiveParallelism,
-    )) {
-      await Future.wait(chunk.map(runForLanguage));
-    }
+    await forEachPooled(translationLanguageCodes, effectiveParallelism, runForLanguage);
 
     statistics.printSummary();
+    SkippedTranslations.printSummary();
 
     // Generate Dart code if requested
     if (generateDart) {
@@ -308,6 +306,51 @@ class SingleFileProcessor {
   ///   statistics,
   /// );
   /// ```
+  /// Resources of [sourceArbPath] that still need a provider translation for
+  /// [languageCode], i.e. those an all-locale Codex batch should cover.
+  static List<TranslationResource> pendingProviderResources({
+    required String sourceArbPath,
+    required String languageCode,
+    required String outputDirectory,
+    required String outputFileName,
+    required String translationService,
+    String openaiModel = 'gpt-4o-mini',
+    String? translationContext,
+    CodexOptions? codexOptions,
+    LocalLlmOptions? localLlmOptions,
+    String? reviewedTranslationsDir,
+    Set<String>? resourceKeyFilter,
+  }) {
+    final sourceDocument = ArbDocument.decode(File(sourceArbPath).readAsStringSync());
+    final outputFilePath = path.join(outputDirectory, outputFileName);
+    return _planLanguage(
+      languageCode: languageCode,
+      existingTranslation: _readExistingTranslation(outputFilePath),
+      sourceDocument: sourceDocument,
+      sourceTopic: path.basename(sourceArbPath),
+      provenanceFile: File('$outputFilePath.provenance.json'),
+      translationService: translationService,
+      openaiModel: openaiModel,
+      translationContext: translationContext,
+      codexOptions: codexOptions,
+      localLlmOptions: localLlmOptions,
+      reviewedTranslationsDir: reviewedTranslationsDir,
+      manualOnly: false,
+      resourceKeyFilter: resourceKeyFilter,
+    ).providerResources;
+  }
+
+  static ArbDocument? _readExistingTranslation(String outputFilePath) {
+    final outputFile = File(outputFilePath);
+    if (!outputFile.existsSync()) return null;
+    try {
+      return ArbDocument.decode(outputFile.readAsStringSync());
+    } catch (e) {
+      print('Warning: Could not parse existing translation file: $outputFilePath');
+      return null;
+    }
+  }
+
   static Future<void> processSingleFileWithChanges(
     String sourceArbPath,
     List<String> languageCodes,
@@ -331,26 +374,15 @@ class SingleFileProcessor {
     bool preserveUnrelatedExistingResources = false,
     http.Client? client,
     Set<String>? resourceKeyFilter,
+    Map<String, Map<String, String>>? prefetchedByLocale,
   }) async {
     final sourceArbFile = File(sourceArbPath);
     final sourceContent = sourceArbFile.readAsStringSync();
     final sourceDocument = ArbDocument.decode(sourceContent);
 
-    // Check if output file already exists
     final outputFilePath = path.join(outputDirectory, outputFileName);
-    final outputFile = File(outputFilePath);
 
-    ArbDocument? existingTranslation;
-    if (outputFile.existsSync()) {
-      try {
-        final existingContent = outputFile.readAsStringSync();
-        existingTranslation = ArbDocument.decode(existingContent);
-      } catch (e) {
-        print(
-          'Warning: Could not parse existing translation file: $outputFilePath',
-        );
-      }
-    }
+    final existingTranslation = _readExistingTranslation(outputFilePath);
 
     final effectiveParallelism = parallelTranslations < 1 ? 1 : parallelTranslations;
 
@@ -377,39 +409,33 @@ class SingleFileProcessor {
         preserveUnrelatedExistingResources: preserveUnrelatedExistingResources,
         client: client,
         resourceKeyFilter: resourceKeyFilter,
+        prefetched: prefetchedByLocale?[languageCode],
       );
       final file = await File(outputFilePath).create(recursive: true);
       await file.writeAsString(translated.document.encode());
       await translated.writeProvenance();
     }
 
-    for (final chunk in _chunked(languageCodes, effectiveParallelism)) {
-      await Future.wait(chunk.map(translateLanguage));
-    }
+    await forEachPooled(languageCodes, effectiveParallelism, translateLanguage);
   }
 
-  static Future<_TranslatedFileResult> _translateLanguageForFile({
+  /// Works out which resources of [sourceDocument] already have a current
+  /// translation for [languageCode] and which still need the provider.
+  static _LanguagePlan _planLanguage({
     required String languageCode,
     required ArbDocument? existingTranslation,
     required ArbDocument sourceDocument,
     required String sourceTopic,
     required File provenanceFile,
-    required String apiKey,
     required String translationService,
-    required String? projectId,
-    required String authMode,
-    required String? credentialsFile,
-    required String? quotaProjectId,
     required String openaiModel,
     required String? translationContext,
     required CodexOptions? codexOptions,
     required LocalLlmOptions? localLlmOptions,
     required String? reviewedTranslationsDir,
     required bool manualOnly,
-    required bool preserveUnrelatedExistingResources,
-    required http.Client? client,
     required Set<String>? resourceKeyFilter,
-  }) async {
+  }) {
     final resources = sourceDocument.resources.values
         .where((resource) => resourceKeyFilter == null || resourceKeyFilter.contains(resource.id))
         .map(
@@ -493,22 +519,93 @@ class SingleFileProcessor {
       };
     }
     if (missing.isNotEmpty) throw ManualCoverageException(missing);
+    return _LanguagePlan(resolved, providerResources, nextProvenance, previousProvenance);
+  }
+
+  static Future<_TranslatedFileResult> _translateLanguageForFile({
+    required String languageCode,
+    required ArbDocument? existingTranslation,
+    required ArbDocument sourceDocument,
+    required String sourceTopic,
+    required File provenanceFile,
+    required String apiKey,
+    required String translationService,
+    required String? projectId,
+    required String authMode,
+    required String? credentialsFile,
+    required String? quotaProjectId,
+    required String openaiModel,
+    required String? translationContext,
+    required CodexOptions? codexOptions,
+    required LocalLlmOptions? localLlmOptions,
+    required String? reviewedTranslationsDir,
+    required bool manualOnly,
+    required bool preserveUnrelatedExistingResources,
+    required http.Client? client,
+    required Set<String>? resourceKeyFilter,
+    Map<String, String>? prefetched,
+  }) async {
+    final plan = _planLanguage(
+      languageCode: languageCode,
+      existingTranslation: existingTranslation,
+      sourceDocument: sourceDocument,
+      sourceTopic: sourceTopic,
+      provenanceFile: provenanceFile,
+      translationService: translationService,
+      openaiModel: openaiModel,
+      translationContext: translationContext,
+      codexOptions: codexOptions,
+      localLlmOptions: localLlmOptions,
+      reviewedTranslationsDir: reviewedTranslationsDir,
+      manualOnly: manualOnly,
+      resourceKeyFilter: resourceKeyFilter,
+    );
+    final resolved = plan.resolved;
+    final nextProvenance = plan.nextProvenance;
+    var providerResources = plan.providerResources;
+    if (prefetched != null && providerResources.isNotEmpty) {
+      // Already translated for this locale by an all-locale Codex batch run.
+      for (final resource in providerResources) {
+        final translation = prefetched[resource.id];
+        if (translation != null) {
+          resolved[resource.id] = TranslationService.sanitizeTranslation(translation);
+        }
+      }
+      providerResources =
+          providerResources.where((resource) => !resolved.containsKey(resource.id)).toList(growable: false);
+    }
     if (providerResources.isNotEmpty) {
       if (translationService == 'openai' || translationService == 'local_llm' || translationService == 'codex') {
-        final results = await TranslationService.translateResources(
-          resources: providerResources,
-          parameters: <String, dynamic>{
-            'target': languageCode,
-            'source': sourceDocument.locale,
-            'key': apiKey,
-            'openai_model': openaiModel,
-            'translation_context': translationContext,
-          },
-          translationService: translationService,
-          codexOptions: codexOptions,
-          localLlmOptions: localLlmOptions,
-          client: client,
-        );
+        List<TranslationResult> results;
+        try {
+          results = await TranslationService.translateResources(
+            resources: providerResources,
+            parameters: <String, dynamic>{
+              'target': languageCode,
+              'source': sourceDocument.locale,
+              'key': apiKey,
+              'openai_model': openaiModel,
+              'translation_context': translationContext,
+            },
+            translationService: translationService,
+            codexOptions: codexOptions,
+            localLlmOptions: localLlmOptions,
+            client: client,
+          );
+        } on CodexLocaleUnavailable catch (error) {
+          // Keep the previous (or source) text, and restore the previous
+          // provenance so the next run sees these resources as still pending.
+          SkippedTranslations.record(languageCode, sourceTopic, providerResources.map((r) => r.id), error);
+          for (final resource in providerResources) {
+            final previous = plan.previousProvenance[resource.id];
+            if (previous == null) {
+              nextProvenance.remove(resource.id);
+            } else {
+              nextProvenance[resource.id] = previous;
+            }
+          }
+          results = const [];
+        }
         for (final result in results) {
           resolved[result.id] = TranslationService.sanitizeTranslation(
             result.translation,
@@ -621,17 +718,6 @@ class SingleFileProcessor {
     return '$outputFileName$languageCode.arb';
   }
 
-  /// Splits [items] into successive chunks of size [size].
-  static Iterable<List<T>> _chunked<T>(List<T> items, int size) sync* {
-    if (size <= 0) {
-      throw ArgumentError.value(size, 'size', 'chunk size must be >= 1');
-    }
-    for (var start = 0; start < items.length; start += size) {
-      final end = (start + size < items.length) ? start + size : items.length;
-      yield items.sublist(start, end);
-    }
-  }
-
   static bool _isSameLocale(String left, String right) {
     return left.trim().replaceAll('-', '_').toLowerCase() == right.trim().replaceAll('-', '_').toLowerCase();
   }
@@ -644,6 +730,38 @@ Map<String, dynamic> _readProvenance(File file) {
     return decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
   } catch (_) {
     return <String, dynamic>{};
+  }
+}
+
+class _LanguagePlan {
+  final Map<String, String> resolved;
+  final List<TranslationResource> providerResources;
+  final Map<String, dynamic> nextProvenance;
+  final Map<String, dynamic> previousProvenance;
+
+  const _LanguagePlan(this.resolved, this.providerResources, this.nextProvenance, this.previousProvenance);
+}
+
+/// Locales Codex could not translate during this run, reported at the end.
+class SkippedTranslations {
+  static final List<({String locale, String sourceFile, List<String> ids, Object cause})> _entries = [];
+
+  static void record(String locale, String sourceFile, Iterable<String> ids, Object cause) {
+    _entries.add((locale: locale, sourceFile: sourceFile, ids: ids.toList(growable: false), cause: cause));
+    print('  ⚠ Skipping ${ids.length} resource(s) in $sourceFile for $locale: $cause');
+  }
+
+  static bool get isEmpty => _entries.isEmpty;
+
+  static void clear() => _entries.clear();
+
+  static void printSummary() {
+    if (_entries.isEmpty) return;
+    final locales = _entries.map((entry) => entry.locale).toSet().toList()..sort();
+    final count = _entries.fold<int>(0, (sum, entry) => sum + entry.ids.length);
+    print('');
+    print('⚠ $count translation(s) were skipped after Codex failed for: ${locales.join(', ')}.');
+    print('  They keep their previous or source-language text. Run the translator again to fill them in.');
   }
 }
 

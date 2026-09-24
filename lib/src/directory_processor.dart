@@ -4,13 +4,16 @@ import 'dart:io';
 import 'package:arb_merge/arb_merge.dart';
 import 'package:console/console.dart';
 import 'package:path/path.dart' as path;
+import 'package:smart_arb_translator/src/concurrency.dart';
 import 'package:smart_arb_translator/src/dart_code_generator.dart';
 import 'package:smart_arb_translator/src/file_operations.dart' as translator_file_ops;
 import 'package:smart_arb_translator/src/models/arb_document.dart';
 import 'package:smart_arb_translator/src/models/arb_resource.dart';
 import 'package:smart_arb_translator/src/models/codex_options.dart';
 import 'package:smart_arb_translator/src/models/local_llm_options.dart';
+import 'package:smart_arb_translator/src/models/translation_resource.dart';
 import 'package:smart_arb_translator/src/single_file_processor.dart';
+import 'package:smart_arb_translator/src/translation_service.dart';
 import 'package:smart_arb_translator/src/translation_statistics.dart';
 
 /// Processor for handling directory-based ARB translation workflows.
@@ -124,6 +127,7 @@ class DirectoryProcessor {
   }) async {
     dartClassName ??= (l10nMethod == 'gen-l10n') ? 'AppLocalizations' : 'S';
     final effectiveParallelism = parallelTranslations < 1 ? 1 : parallelTranslations;
+    SkippedTranslations.clear();
 
     Directory sourceDir = Directory(sourcePath);
     if (!sourceDir.existsSync()) {
@@ -229,6 +233,8 @@ class DirectoryProcessor {
         resourceKeyFilter: resourceKeyFilter,
       );
     }
+
+    SkippedTranslations.printSummary();
 
     _pruneCombinedLocaleCaches(
       outputPath: effectiveOutputPath,
@@ -427,13 +433,13 @@ class DirectoryProcessor {
     print('✓ Rebuilt protected source locale file: ${destination.path}');
   }
 
-  /// Processes a single ARB file for every target language, batching the
-  /// per-language translation calls into chunks of [parallelTranslations].
+  /// Processes a single ARB file for every target language, with at most
+  /// [parallelTranslations] languages in flight. A language that finishes
+  /// frees its slot for the next one immediately. Setting
+  /// [parallelTranslations] to 1 reproduces strictly sequential behavior.
   ///
-  /// Languages within a chunk run concurrently via [Future.wait]. Chunks run
-  /// sequentially so we cap the maximum number of in-flight translation
-  /// requests against the upstream provider. Setting [parallelTranslations] to
-  /// 1 reproduces the original strictly sequential behavior.
+  /// With Codex, a small change is first translated for all languages in one
+  /// run (see [_prefetchCodexBatch]).
   static Future<void> _processArbFileForAllLanguages({
     required File arbFile,
     required List<String> languageCodes,
@@ -460,6 +466,20 @@ class DirectoryProcessor {
     final fileExt = path.extension(path.basename(arbFile.path));
     final relativePath = path.relative(arbFile.path, from: workingSourcePath);
     final previousDocument = previousSourceFiles[relativePath];
+
+    final prefetchedByLocale =
+        translationService == 'codex' && codexOptions != null && codexOptions.batchMaxResources > 0 && !manualOnly
+            ? await _prefetchCodexBatch(
+                arbFile: arbFile,
+                languageCodes: languageCodes,
+                outputFileName: outputFileName,
+                effectiveOutputPath: effectiveOutputPath,
+                translationContext: translationContext,
+                codexOptions: codexOptions,
+                reviewedTranslationsDir: reviewedTranslationsDir,
+                resourceKeyFilter: resourceKeyFilter,
+              )
+            : const <String, Map<String, String>>{};
 
     Future<void> runForLanguage(String languageCode) async {
       final langOutputDir = path.join(effectiveOutputPath, languageCode);
@@ -490,12 +510,70 @@ class DirectoryProcessor {
         manualOnly: manualOnly,
         preserveUnrelatedExistingResources: true,
         resourceKeyFilter: resourceKeyFilter,
+        prefetchedByLocale: prefetchedByLocale,
       );
     }
 
-    for (final chunk in _chunked(languageCodes, parallelTranslations)) {
-      await Future.wait(chunk.map(runForLanguage));
+    await forEachPooled(languageCodes, parallelTranslations, runForLanguage);
+  }
+
+  /// Translates a small change for every locale that needs it in a single
+  /// Codex run, returning `locale -> id -> translation`. Locales it cannot
+  /// cover are simply absent and fall back to per-locale translation.
+  static Future<Map<String, Map<String, String>>> _prefetchCodexBatch({
+    required File arbFile,
+    required List<String> languageCodes,
+    required String outputFileName,
+    required String effectiveOutputPath,
+    required String? translationContext,
+    required CodexOptions codexOptions,
+    required String? reviewedTranslationsDir,
+    required Set<String>? resourceKeyFilter,
+  }) async {
+    final fileExt = path.extension(path.basename(arbFile.path));
+    final pendingByLocale = <String, List<TranslationResource>>{};
+    for (final languageCode in languageCodes) {
+      final pending = SingleFileProcessor.pendingProviderResources(
+        sourceArbPath: arbFile.path,
+        languageCode: languageCode,
+        outputDirectory: path.join(effectiveOutputPath, languageCode),
+        outputFileName: _resolveLanguageOutputFileName(
+          outputFileName: outputFileName,
+          languageCode: languageCode,
+          fileExt: fileExt,
+        ),
+        translationService: 'codex',
+        translationContext: translationContext,
+        codexOptions: codexOptions,
+        reviewedTranslationsDir: reviewedTranslationsDir,
+        resourceKeyFilter: resourceKeyFilter,
+      );
+      if (pending.isNotEmpty) pendingByLocale[languageCode] = pending;
     }
+    if (pendingByLocale.length < 2) return const {};
+
+    final resourcesById = <String, TranslationResource>{
+      for (final pending in pendingByLocale.values)
+        for (final resource in pending) resource.id: resource,
+    };
+    if (resourcesById.length > codexOptions.batchMaxResources) return const {};
+
+    final locales = pendingByLocale.keys.toList(growable: false);
+    print(
+      '• Translating ${resourcesById.length} resource(s) from ${path.basename(arbFile.path)} '
+      'into ${locales.length} locales in one Codex run',
+    );
+    final sourceLocale = ArbDocument.decode(arbFile.readAsStringSync()).locale;
+    final results = await TranslationService.translateCodexBatch(
+      resources: resourcesById.values.toList(growable: false),
+      targetLocales: locales,
+      sourceLocale: sourceLocale,
+      translationContext: translationContext,
+      codexOptions: codexOptions,
+    );
+    return <String, Map<String, String>>{
+      for (final entry in results.entries) entry.key: {for (final result in entry.value) result.id: result.translation},
+    };
   }
 
   static Set<String> _authoritativeSourceKeys(List<File> sourceFiles) {
@@ -566,19 +644,6 @@ class DirectoryProcessor {
     if (outputFileName.isEmpty) return '$languageCode$fileExt';
     if (outputFileName.endsWith('_')) return '$outputFileName$languageCode$fileExt';
     return '${outputFileName}_$languageCode$fileExt';
-  }
-
-  /// Splits [items] into successive chunks of size [size].
-  ///
-  /// Returns lazily so callers can `await` each chunk before the next is built.
-  static Iterable<List<T>> _chunked<T>(List<T> items, int size) sync* {
-    if (size <= 0) {
-      throw ArgumentError.value(size, 'size', 'chunk size must be >= 1');
-    }
-    for (var start = 0; start < items.length; start += size) {
-      final end = (start + size < items.length) ? start + size : items.length;
-      yield items.sublist(start, end);
-    }
   }
 
   static void _setBrightRed() {
