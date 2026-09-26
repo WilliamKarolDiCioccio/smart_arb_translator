@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-09-27
+
+### Fixed
+
+- Accept explicit null or `pending` review verdicts as incomplete review history instead of aborting translation. These records and unresolved verification disputes do not supply reviewed coverage; current cache entries, embedded translations, or the configured provider still resolve the resource normally.
+- Validate reviewed overlays against the complete source file before applying `--key`, so unselected review records no longer cause unknown-key failures.
+
 ## [1.11.0] - 2026-09-24
 
 ### Added

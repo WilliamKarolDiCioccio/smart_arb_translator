@@ -335,9 +335,14 @@ Codex environment.
 For Codex-reviewed projects, configure `reviewed_translations_dir` and run with
 `manual_only: true` (or `--offline`). Reviewed ledgers must minimally pair each
 ARB value with `source`, `translation`, `sourceFingerprint`, and
-`contextFingerprint`; review workflow ledgers additionally require primary and
-verification verdicts. Provider/model changes invalidate automatic cache data,
-not reviewed translations.
+`contextFingerprint`. Review workflow ledgers also contain `primaryVerdict` and
+`verificationVerdict`. Explicit `null` or `pending` verdicts are valid unfinished
+reviews, but do not provide reviewed coverage. Verification disputes also need
+a completed adjudication (`pass`, `replace`, or `resolved`). Pending entries use
+embedded translations, current cache data, or the configured provider; offline
+mode reports missing coverage when none is available. Missing verdict fields,
+malformed values, and inconsistent source/translation pairs remain errors.
+Provider/model changes invalidate automatic cache data, not reviewed translations.
 
 `LocalizationValidator.validatePair` treats unchanged short controls such as
 `Back`, `Clear`, and `Background` as suspicious for non-English targets.

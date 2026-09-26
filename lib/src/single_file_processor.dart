@@ -437,7 +437,6 @@ class SingleFileProcessor {
     required Set<String>? resourceKeyFilter,
   }) {
     final resources = sourceDocument.resources.values
-        .where((resource) => resourceKeyFilter == null || resourceKeyFilter.contains(resource.id))
         .map(
           (resource) => TranslationResource.fromArbResource(
             resource,
@@ -472,6 +471,9 @@ class SingleFileProcessor {
     final missing = <MissingManualCoverage>[];
     final nextProvenance = <String, dynamic>{...previousProvenance};
     for (final resource in resources) {
+      // Validate overlays against the complete source file, then scope work.
+      // Otherwise valid unselected overlay keys look like unknown resources.
+      if (resourceKeyFilter != null && !resourceKeyFilter.contains(resource.id)) continue;
       final sourceFingerprint = TranslationFingerprint.source(resource);
       final contextFingerprint = TranslationFingerprint.cacheContext(
         resource,

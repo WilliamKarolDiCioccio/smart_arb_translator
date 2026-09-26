@@ -85,7 +85,8 @@ class ReviewedOverlay {
       if (record is! Map<String, dynamic>) {
         throw FormatException('Review ledger ${ledgerFile.path} lacks a record for ${entry.key}.');
       }
-      _validateLedgerRecord(record, resource, entry.value.text, ledgerFile.path);
+      final reviewComplete = _validateLedgerRecord(record, resource, entry.value.text, ledgerFile.path);
+      if (!reviewComplete) continue;
       final sourceFingerprint = TranslationFingerprint.source(resource);
       final contextFingerprint = TranslationFingerprint.reviewContext(
         resource,
@@ -125,7 +126,7 @@ class ReviewedOverlay {
       left.trim().replaceAll('-', '_').toLowerCase() == right.trim().replaceAll('-', '_').toLowerCase();
 }
 
-void _validateLedgerRecord(
+bool _validateLedgerRecord(
   Map<String, dynamic> record,
   TranslationResource resource,
   String arbTranslation,
@@ -150,10 +151,22 @@ void _validateLedgerRecord(
       record.containsKey('primaryVerdict') ||
       record.containsKey('verificationVerdict');
   if (hasReviewWorkflowFields) {
+    var reviewComplete = true;
     for (final field in ['primaryVerdict', 'verificationVerdict']) {
-      if (record[field] is! String || (record[field] as String).trim().isEmpty) {
+      final verdict = record[field];
+      // Explicit nulls are valid pending review history. Older consumers also
+      // used "pending" as a compatibility marker. Neither is reviewed coverage.
+      if (record.containsKey(field) && (verdict == null || verdict == 'pending')) {
+        reviewComplete = false;
+      } else if (verdict is! String || verdict.trim().isEmpty) {
         throw FormatException('Review ledger $ledgerPath is missing $field for ${resource.id}.');
       }
     }
+    if (record['verificationVerdict'] == 'disputed' &&
+        !const ['pass', 'replace', 'resolved'].contains(record['adjudicationVerdict'])) {
+      reviewComplete = false;
+    }
+    return reviewComplete;
   }
+  return true;
 }
